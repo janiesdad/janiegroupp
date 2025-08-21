@@ -14,17 +14,19 @@ import * as THREE from "three";
 import brandLogo from 'figma:asset/6dd9e84b22d122a47a670bd6e79c8e88d1bf7abc.png';
 
 // Audio context for sharing between components
+type SynthParams = {
+  attack: number;
+  filter: number;
+  distortion: number;
+  pitchBend: number;
+};
+
 const AudioContextProvider = createContext<{
   audioContext: AudioContext | null;
   analyser: AnalyserNode | null;
   gainNode: GainNode | null;
-  synthParams: {
-    attack: number;
-    filter: number;
-    distortion: number;
-    pitchBend: number;
-  };
-  setSynthParams: (params: any) => void;
+  synthParams: SynthParams;
+  setSynthParams: React.Dispatch<React.SetStateAction<SynthParams>>;
 }>({
   audioContext: null,
   analyser: null,
@@ -35,7 +37,7 @@ const AudioContextProvider = createContext<{
     distortion: 0.3,
     pitchBend: 0.5,
   },
-  setSynthParams: () => {},
+  setSynthParams: (() => {}) as React.Dispatch<React.SetStateAction<SynthParams>>,
 });
 
 // Piano key configuration - now with 8 white keys
@@ -585,7 +587,7 @@ function CloudFBM() {
 function Visualizer() {
   return (
     <div className="w-[200px] h-[200px] border-2 border-white rounded-lg overflow-hidden touch-none">
-      <Canvas camera={{ position: [0, 0, 1] }}>
+      <Canvas dpr={[1, 2]} camera={{ position: [0, 0, 1] }}>
         <CloudFBM />
       </Canvas>
     </div>
@@ -642,11 +644,11 @@ function Controls() {
       const normalizedAngle = (angle + Math.PI) / (2 * Math.PI);
       const value = Math.max(0, Math.min(1, normalizedAngle));
 
-      const paramNames = ["attack", "filter", "distortion"];
-      setSynthParams({
-        ...synthParams,
+      const paramNames = ["attack", "filter", "distortion"] as const;
+      setSynthParams((prev) => ({
+        ...prev,
         [paramNames[index]]: value,
-      });
+      }));
     }
   };
 
@@ -665,10 +667,10 @@ function Controls() {
     const coords = getEventCoordinates(event);
     const x = coords.clientX - rect.left;
     const value = Math.max(0, Math.min(1, x / rect.width));
-    setSynthParams({
-      ...synthParams,
+    setSynthParams((prev) => ({
+      ...prev,
       pitchBend: value,
-    });
+    }));
   };
 
   const handleSliderStart = (
@@ -730,10 +732,10 @@ function Controls() {
             0,
             Math.min(1, x / rect.width),
           );
-          setSynthParams({
-            ...synthParams,
+          setSynthParams((prev) => ({
+            ...prev,
             pitchBend: value,
-          });
+          }));
         }
       }
     };
@@ -772,7 +774,7 @@ function Controls() {
       );
       document.removeEventListener("touchend", handleGlobalEnd);
     };
-  }, [isSliderDragging, synthParams, setSynthParams]);
+  }, [isSliderDragging, setSynthParams]);
 
   const knobValues = [
     synthParams.attack,
@@ -875,6 +877,22 @@ export default function MidiPianoApp() {
     pitchBend: 0.6,
   });
 
+  // Cacheable distortion curve for performance
+  const distortionCurveRef = useRef<Float32Array | null>(null);
+
+  useEffect(() => {
+    // Recompute curve when distortion amount changes
+    const amount = synthParams.distortion * 50;
+    const samples = 2048;
+    const curve = new Float32Array(samples);
+    const deg = Math.PI / 180;
+    for (let i = 0; i < samples; i++) {
+      const x = (i * 2) / samples - 1;
+      curve[i] = ((3 + amount) * x * 20 * deg) / (Math.PI + amount * Math.abs(x));
+    }
+    distortionCurveRef.current = curve;
+  }, [synthParams.distortion]);
+
   // Disable scrolling and bouncing on mobile
   useEffect(() => {
     const preventScroll = (e: TouchEvent) => {
@@ -930,6 +948,9 @@ export default function MidiPianoApp() {
       const analyserNode = ctx.createAnalyser();
       const gain = ctx.createGain();
 
+      // Master gain to avoid clipping
+      gain.gain.value = 0.6;
+
       analyserNode.fftSize = 256;
       analyserNode.smoothingTimeConstant = 0.8;
 
@@ -941,6 +962,22 @@ export default function MidiPianoApp() {
       setGainNode(gain);
     }
   }, []);
+
+  // Unlock/resume audio on first user interaction (mobile/Chrome autoplay policy)
+  useEffect(() => {
+    if (!audioContext) return;
+    const unlock = () => {
+      if (audioContext.state !== "running") {
+        audioContext.resume().catch(() => {});
+      }
+    };
+    window.addEventListener("pointerdown", unlock, { once: true });
+    window.addEventListener("keydown", unlock, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, [audioContext]);
 
   const playNote = useCallback(
     (note: string) => {
@@ -986,22 +1023,19 @@ export default function MidiPianoApp() {
           audioContext.currentTime,
         );
 
-        // Setup distortion
-        const makeDistortionCurve = (amount: number) => {
-          const samples = 44100;
+        // Setup distortion using cached curve
+        if (!distortionCurveRef.current) {
+          const amount = synthParams.distortion * 50;
+          const samples = 2048;
           const curve = new Float32Array(samples);
           const deg = Math.PI / 180;
           for (let i = 0; i < samples; i++) {
             const x = (i * 2) / samples - 1;
-            curve[i] =
-              ((3 + amount) * x * 20 * deg) /
-              (Math.PI + amount * Math.abs(x));
+            curve[i] = ((3 + amount) * x * 20 * deg) / (Math.PI + amount * Math.abs(x));
           }
-          return curve;
-        };
-        distortion.curve = makeDistortionCurve(
-          synthParams.distortion * 50,
-        );
+          distortionCurveRef.current = curve;
+        }
+        distortion.curve = distortionCurveRef.current as Float32Array;
         distortion.oversample = "4x";
 
         // Connect audio chain
