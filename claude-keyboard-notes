@@ -78,6 +78,32 @@ const taskPrompts = {
   },
 };
 
+// Per-key sound customization. Any value provided here overrides the global synth controls for that key.
+// You can tune waveform, envelope attack, filter intensity, distortion, and detune in cents.
+const perKeySoundConfig: {
+  [note: string]: {
+    waveform?: OscillatorType;
+    attack?: number; // 0..1 mapped to 0.01..0.31s
+    filter?: number; // 0..1 mapped to 200..8200 Hz
+    distortion?: number; // 0..1 mapped to curve amount
+    detuneCents?: number; // -1200..+1200 typical range
+  };
+} = {
+  C: { waveform: "sine", attack: 0.15, filter: 0.25, distortion: 0.1 },
+  "C#": { waveform: "triangle", attack: 0.1, filter: 0.35, distortion: 0.2, detuneCents: +8 },
+  D: { waveform: "sawtooth", attack: 0.2, filter: 0.5, distortion: 0.3 },
+  "D#": { waveform: "square", attack: 0.12, filter: 0.45, distortion: 0.4, detuneCents: -5 },
+  E: { waveform: "triangle", attack: 0.18, filter: 0.4, distortion: 0.15 },
+  F: { waveform: "sine", attack: 0.22, filter: 0.3, distortion: 0.05 },
+  "F#": { waveform: "sawtooth", attack: 0.08, filter: 0.55, distortion: 0.5 },
+  G: { waveform: "square", attack: 0.25, filter: 0.6, distortion: 0.35 },
+  "G#": { waveform: "triangle", attack: 0.14, filter: 0.5, distortion: 0.25 },
+  A: { waveform: "sine", attack: 0.2, filter: 0.45, distortion: 0.1 },
+  "A#": { waveform: "sawtooth", attack: 0.1, filter: 0.65, distortion: 0.55 },
+  B: { waveform: "triangle", attack: 0.18, filter: 0.5, distortion: 0.2 },
+  C2: { waveform: "square", attack: 0.22, filter: 0.6, distortion: 0.4, detuneCents: +3 },
+};
+
 interface PianoKeyProps {
   note: string;
   isBlack?: boolean;
@@ -174,6 +200,75 @@ function TaskPromptCard({ note }: { note: string }) {
         <p className="text-gray-300 font-mono text-sm leading-relaxed">
           {prompt.content}
         </p>
+      </div>
+    </div>
+  );
+}
+
+function HiddenContent({ unlockedCount }: { unlockedCount: number }) {
+  const stages = [
+    {
+      title: "Prelude: The First Hint",
+      body:
+        "You have found the entryway. The melody points toward a pattern; listen for repetition.",
+    },
+    {
+      title: "Interlude: Structure Emerges",
+      body:
+        "Patterns become phrases. Map your impulses to intention; record what you repeat.",
+    },
+    {
+      title: "Development: Hidden Index",
+      body:
+        "Every key has a number. Sum the steps you take; differences reveal directions.",
+    },
+    {
+      title: "Cadenza: The Doorway Opens",
+      body:
+        "You now possess a key. The index corresponds to a line; align your notes with words.",
+    },
+    {
+      title: "Finale: The Article Appears",
+      body:
+        "The full document unlocks. Knowledge flows in phrases; archive what you have learned.",
+    },
+  ];
+
+  return (
+    <div className="mt-6 w-full max-w-md mx-auto space-y-3">
+      {stages.slice(0, Math.min(unlockedCount, stages.length)).map((s, i) => (
+        <div key={i} className="bg-black border-2 border-white rounded-lg p-4 animate-in fade-in">
+          <div className="text-white font-mono tracking-wider mb-1">{s.title}</div>
+          <div className="text-gray-300 font-mono text-sm leading-relaxed">{s.body}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SequenceHUD({
+  sequence,
+  progress,
+  roundIndex,
+}: {
+  sequence: string[];
+  progress: number;
+  roundIndex: number;
+}) {
+  return (
+    <div className="mt-4 w-full max-w-md mx-auto">
+      <div className="bg-black border-2 border-white rounded-lg p-3">
+        <div className="text-white font-mono text-sm mb-2">Round {roundIndex + 1}</div>
+        <div className="flex items-center gap-2">
+          {sequence.map((note, idx) => (
+            <div
+              key={`${note}-${idx}`}
+              className={`px-2 py-1 border rounded font-mono text-xs ${idx < progress ? "bg-white text-black border-white" : "text-white border-white/60"}`}
+            >
+              {note}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -860,6 +955,11 @@ export default function MidiPianoApp() {
     new Set(),
   );
   const [activePrompt, setActivePrompt] = useState<string | null>(null);
+  // Progressive unlock and round logic state
+  const [roundIndex, setRoundIndex] = useState<number>(0);
+  const [sequenceProgress, setSequenceProgress] = useState<number>(0);
+  const [unlockedCount, setUnlockedCount] = useState<number>(0);
+  const [winFlash, setWinFlash] = useState<boolean>(false);
   const [audioContext, setAudioContext] =
     useState<AudioContext | null>(null);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(
@@ -874,6 +974,37 @@ export default function MidiPianoApp() {
     distortion: 0.7,
     pitchBend: 0.6,
   });
+
+  // Define the target sequences for each round; progressively longer
+  const sequences: string[][] = useMemo(() => [
+    ["C", "E", "G"],
+    ["D", "F", "A", "C2"],
+    ["E", "G", "B", "D", "F#"],
+    ["F", "A", "C2", "E", "G", "B"],
+    ["G", "B", "D", "F#", "A#", "C2", "E"],
+  ], []);
+
+  // Persist and restore progress
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("kb_unlock_progress");
+      if (saved) {
+        const parsed = JSON.parse(saved) as { roundIndex: number; unlockedCount: number };
+        setRoundIndex(parsed.roundIndex || 0);
+        setUnlockedCount(parsed.unlockedCount || 0);
+        setSequenceProgress(0);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "kb_unlock_progress",
+        JSON.stringify({ roundIndex, unlockedCount }),
+      );
+    } catch {}
+  }, [roundIndex, unlockedCount]);
 
   // Disable scrolling and bouncing on mobile
   useEffect(() => {
@@ -967,22 +1098,29 @@ export default function MidiPianoApp() {
           C2: 523.25, // Higher octave C
         };
 
-        // Apply pitch bend (-12 to +12 semitones)
-        const pitchMultiplier = Math.pow(
-          2,
-          (synthParams.pitchBend - 0.5) * 2,
-        );
+        // Determine effective params (per-key overrides fall back to global controls)
+        const overrides = perKeySoundConfig[note] || {};
+        const effectiveAttack = overrides.attack ?? synthParams.attack;
+        const effectiveFilter = overrides.filter ?? synthParams.filter;
+        const effectiveDistortion = overrides.distortion ?? synthParams.distortion;
+
+        // Apply pitch bend (-12 to +12 semitones) and optional detune in cents
+        const pitchMultiplier = Math.pow(2, (synthParams.pitchBend - 0.5) * 2);
         const frequency =
           (noteFrequencies[note] || 440) * pitchMultiplier;
+
+        if (typeof overrides.detuneCents === "number") {
+          oscillator.detune.setValueAtTime(overrides.detuneCents, audioContext.currentTime);
+        }
 
         // Setup filter
         filter.type = "lowpass";
         filter.frequency.setValueAtTime(
-          200 + synthParams.filter * 8000,
+          200 + effectiveFilter * 8000,
           audioContext.currentTime,
         );
         filter.Q.setValueAtTime(
-          1 + synthParams.distortion * 10,
+          1 + effectiveDistortion * 10,
           audioContext.currentTime,
         );
 
@@ -1000,7 +1138,7 @@ export default function MidiPianoApp() {
           return curve;
         };
         distortion.curve = makeDistortionCurve(
-          synthParams.distortion * 50,
+          effectiveDistortion * 50,
         );
         distortion.oversample = "4x";
 
@@ -1014,10 +1152,10 @@ export default function MidiPianoApp() {
           frequency,
           audioContext.currentTime,
         );
-        oscillator.type = "square";
+        oscillator.type = overrides.waveform ?? "square";
 
         // Apply attack envelope
-        const attackTime = 0.01 + synthParams.attack * 0.3;
+        const attackTime = 0.01 + effectiveAttack * 0.3;
         noteGain.gain.setValueAtTime(
           0,
           audioContext.currentTime,
@@ -1047,8 +1185,47 @@ export default function MidiPianoApp() {
       if (whiteKeys.includes(note)) {
         setActivePrompt(note);
       }
+
+      // Sequence game logic: check current expected note
+      setSequenceProgress((prev) => {
+        const target = sequences[roundIndex] || [];
+        const expected = target[prev];
+        if (!expected) return prev;
+
+        if (note === expected) {
+          const nextProgress = prev + 1;
+          if (nextProgress >= target.length) {
+            // Win this round
+            setWinFlash(true);
+            setTimeout(() => setWinFlash(false), 250);
+            setUnlockedCount((c) => Math.min(c + 1, 5));
+            setRoundIndex((r) => Math.min(r + 1, sequences.length - 1));
+
+            // Play subtle unlock cue
+            if (audioContext && gainNode) {
+              const osc = audioContext.createOscillator();
+              const g = audioContext.createGain();
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(880, audioContext.currentTime);
+              g.gain.setValueAtTime(0, audioContext.currentTime);
+              g.gain.linearRampToValueAtTime(0.15, audioContext.currentTime + 0.05);
+              g.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.35);
+              osc.connect(g);
+              g.connect(gainNode);
+              osc.start();
+              osc.stop(audioContext.currentTime + 0.4);
+            }
+
+            return 0; // reset for next round
+          }
+          return nextProgress;
+        } else {
+          // Wrong note resets progress for this round
+          return 0;
+        }
+      });
     },
-    [playNote],
+    [playNote, sequences, roundIndex, audioContext, gainNode],
   );
 
   const handleKeyRelease = useCallback((note: string) => {
@@ -1142,9 +1319,14 @@ export default function MidiPianoApp() {
             PLAY
           </div>
 
+          {/* Round HUD */}
+          <SequenceHUD sequence={sequences[roundIndex] || []} progress={sequenceProgress} roundIndex={roundIndex} />
+
           <div className="flex items-center gap-8">
             {/* Visualizer */}
-            <Visualizer />
+            <div className={`relative ${winFlash ? "ring-4 ring-white/80 rounded-lg" : ""}`}>
+              <Visualizer />
+            </div>
 
             {/* Piano keyboard */}
             <div className="relative touch-none">
@@ -1183,6 +1365,9 @@ export default function MidiPianoApp() {
           {activePrompt && (
             <TaskPromptCard note={activePrompt} />
           )}
+
+          {/* Progressive hidden content reveal */}
+          <HiddenContent unlockedCount={unlockedCount} />
         </div>
       </div>
     </AudioContextProvider.Provider>
